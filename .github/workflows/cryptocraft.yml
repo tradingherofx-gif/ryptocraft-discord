@@ -1,0 +1,35 @@
+name: CryptoCraft to Discord
+
+on:
+  schedule:
+    - cron: "15 */6 * * *"  # elke 6 uur (UTC)
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: state.txt
+          key: state-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: state-${{ github.repository }}-
+
+      - name: Run script
+        env:
+          CRYPTOCRAFT_JSON_URL: ${{ secrets.CRYPTOCRAFT_JSON_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python script.py
+
+      - name: Save state cache
+        uses: actions/cache@v4
+        with:
+          path: state.txt
+          key: state-${{ github.repository }}-${{ github.run_id }}
