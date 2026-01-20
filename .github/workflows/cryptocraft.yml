@@ -1,8 +1,8 @@
-name: CryptoCraft to Discord
+name: CryptoCraft High Impact Reminders
 
 on:
   schedule:
-    - cron: "15 */6 * * *"  # elke 6 uur (UTC)
+    - cron: "*/5 * * * *"   # elke 5 minuten (UTC)
   workflow_dispatch:
 
 jobs:
@@ -18,7 +18,7 @@ jobs:
       - name: Restore state cache
         uses: actions/cache@v4
         with:
-          path: state.txt
+          path: state.json
           key: state-${{ github.repository }}-${{ github.run_id }}
           restore-keys: state-${{ github.repository }}-
 
@@ -26,10 +26,12 @@ jobs:
         env:
           CRYPTOCRAFT_JSON_URL: ${{ secrets.CRYPTOCRAFT_JSON_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Optioneel: zet TIMEZONE als secret, bv. Europe/Amsterdam
+          TIMEZONE: ${{ secrets.TIMEZONE }}
         run: python script.py
 
       - name: Save state cache
         uses: actions/cache@v4
         with:
-          path: state.txt
+          path: state.json
           key: state-${{ github.repository }}-${{ github.run_id }}
