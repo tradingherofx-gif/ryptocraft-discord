@@ -1,7 +1,7 @@
 import os, json, hashlib, urllib.request
 
-JSON_URL = os.environ["https://nfs.faireconomy.media/cc_calendar_thisweek.json?version=bfa0f27c4f880a6bacca6374996affef"]
-WEBHOOK = os.environ["https://discord.com/api/webhooks/1463239653908943039/MbvxrTtZfCFMiF76wiHnKofkLClAPRRsAqYUy7m0SmEKFpicNgRBkMVVndXm_Q524eq-"]
+JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"]
+WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 STATE_FILE = "state.txt"
 
 def fetch_json(url: str):
