@@ -27,11 +27,22 @@ def post_discord(msg: str):
     req = urllib.request.Request(
         WEBHOOK,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        r.read()
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print("DISCORD_HTTP_STATUS:", e.code)
+        print("DISCORD_RESPONSE_BODY:", body)
+        raise
+
 
 
 def event_id(ev: dict) -> str:
