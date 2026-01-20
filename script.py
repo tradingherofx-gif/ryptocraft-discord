@@ -1,24 +1,43 @@
-import os, json, hashlib, urllib.request
+import os
+import json
+import hashlib
+import urllib.request
 
 JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"]
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 STATE_FILE = "state.txt"
 
+
 def fetch_json(url: str):
-    with urllib.request.urlopen(url, timeout=30) as r:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode("utf-8", errors="replace"))
+
 
 def post_discord(msg: str):
     data = json.dumps({"content": msg}).encode("utf-8")
     req = urllib.request.Request(
-        WEBHOOK, data=data, headers={"Content-Type": "application/json"}
+        WEBHOOK,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as r:
         r.read()
 
+
 def event_id(ev: dict) -> str:
     raw = json.dumps(ev, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
 
 def load_state():
     try:
@@ -27,19 +46,21 @@ def load_state():
     except FileNotFoundError:
         return set()
 
+
 def save_state(ids):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(sorted(ids)))
+
 
 def get_events(obj):
     if isinstance(obj, list):
         return obj
     if isinstance(obj, dict):
-        for k in ("events", "data", "items", "calendar"):
-            v = obj.get(k)
-            if isinstance(v, list):
-                return v
-    raise RuntimeError("Onverwachte JSON-structuur: geen lijst met events gevonden.")
+        for key in ("events", "data", "items", "calendar"):
+            if key in obj and isinstance(obj[key], list):
+                return obj[key]
+    raise RuntimeError("Onverwachte JSON-structuur: geen events gevonden")
+
 
 def main():
     obj = fetch_json(JSON_URL)
@@ -74,6 +95,7 @@ def main():
             break
 
     save_state(new_seen)
+
 
 if __name__ == "__main__":
     main()
