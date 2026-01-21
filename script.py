@@ -163,39 +163,50 @@ def make_reminder_message(ev: dict, dt: datetime) -> str:
 
 def main():
     now = datetime.now(TZ)
+
+    # Begin en einde van vandaag (in jouw TIMEZONE)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
 
+    # Laad state
     state = load_state()
     reminded = set(state.get("reminded", []))
     daily_sent = set(state.get("daily_sent", []))
 
+    # Haal events op
     obj = fetch_json(JSON_URL)
     events = get_events(obj)
 
-    # Filter: alleen HIGH + alleen vandaag
+    # Filter: alleen HIGH impact + alleen vandaag
     todays_high = []
     for ev in events:
         if normalize_impact(ev) != "HIGH":
             continue
+
         dt = parse_dt(ev)
         if dt is None:
             continue
+
         if not (today_start <= dt < today_end):
             continue
+
         todays_high.append((ev, dt))
 
-    # Sorteer op tijd
+    # Sorteer events op tijd
     todays_high.sort(key=lambda x: x[1])
 
-    # 1) Daily post rond 00:01 (in jouw TIMEZONE)
-    key = daily_key(now)
-    in_daily_window = (now.hour == DAILY_POST_HOUR and DAILY_POST_MINUTE <= now.minute < DAILY_POST_MINUTE + RUN_WINDOW_MINUTES)
-    if in_daily_window and key not in daily_sent:
-        post_discord(make_daily_message(now, todays_high))
-        daily_sent.add(key)
+    # -------------------------------------------------
+    # 1️⃣ DAGPOST — 1× per dag na 00:01 (jouw TIMEZONE)
+    # -------------------------------------------------
+    day_key = daily_key(now)
 
-    # 2) Reminders: 30 min vooraf, binnen de 5-minuten window
+    if day_key not in daily_sent and now >= today_start + timedelta(minutes=1):
+        post_discord(make_daily_message(now, todays_high))
+        daily_sent.add(day_key)
+
+    # -------------------------------------------------
+    # 2️⃣ REMINDERS — 30 minuten vooraf (HIGH only)
+    # -------------------------------------------------
     window_start = now
     window_end = now + timedelta(minutes=RUN_WINDOW_MINUTES)
 
@@ -210,9 +221,11 @@ def main():
             post_discord(make_reminder_message(ev, dt))
             reminded.add(uid)
 
+    # Sla state op
     state["reminded"] = sorted(reminded)
     state["daily_sent"] = sorted(daily_sent)
     save_state(state)
+
 
 
 if __name__ == "__main__":
