@@ -11,23 +11,29 @@ try:
 except Exception:
     ZoneInfo = None
 
+# ---- Secrets / Config ----
 JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"]
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
-TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "UTC").strip()  # bv. Europe/Amsterdam
+
+# Zet dit als GitHub Secret: TIMEZONE = Europe/Amsterdam
+TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "UTC").strip()
 
 STATE_FILE = "state.json"
 
 REMINDER_MINUTES = 30
-RUN_WINDOW_MINUTES = 5  # workflow draait elke 5 min -> window om reminders te pakken
-DAILY_POST_HOUR = 0
-DAILY_POST_MINUTE = 1   # "00:01"
+
+# Hoe lang na "remind_at" we nog mogen versturen als Actions te laat is
+# Zet dit >= jouw workflow interval (bv 15 als cron */5 of */10 of */15)
+RUN_WINDOW_MINUTES = 20
+
+# Daily post: 1× per dag NA 00:01 lokale tijd
+DAILY_AFTER_MINUTES = 1
 
 
 def tzinfo():
     if TIMEZONE_NAME.upper() == "UTC":
         return timezone.utc
     if ZoneInfo is None:
-        # fallback als zoneinfo niet beschikbaar is
         return timezone.utc
     try:
         return ZoneInfo(TIMEZONE_NAME)
@@ -52,7 +58,7 @@ def fetch_json(url: str):
         return json.loads(r.read().decode("utf-8", errors="replace"))
 
 
-def post_discord(content: str, max_retries: int = 6):
+def post_discord(content: str, max_retries: int = 8):
     payload = json.dumps({"content": content}).encode("utf-8")
 
     for _ in range(max_retries):
@@ -69,11 +75,12 @@ def post_discord(content: str, max_retries: int = 6):
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             if e.code == 429:
+                # Discord rate limit
                 try:
                     retry_after = float(json.loads(body).get("retry_after", 1.0))
                 except Exception:
                     retry_after = 1.0
-                time.sleep(retry_after + 0.2)
+                time.sleep(retry_after + 0.25)
                 continue
             raise RuntimeError(f"Discord HTTP {e.code}: {body}") from e
 
@@ -111,7 +118,10 @@ def normalize_impact(ev: dict) -> str:
     return str(impact).strip().upper()
 
 
-def parse_dt(ev: dict):
+def parse_dt_local(ev: dict):
+    """
+    Parse ISO8601 datetime from the feed and return it in local TZ (Europe/Amsterdam).
+    """
     dt_str = (ev.get("datetime") or ev.get("date") or "").strip()
     if not dt_str:
         return None
@@ -129,28 +139,35 @@ def event_uid(ev: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def fmt_time(dt: datetime) -> str:
-    # Toon lokale NL-tijd + CET/CEST automatisch
+def fmt_time_local(dt: datetime) -> str:
+    """
+    Returns 'HH:MM CET' or 'HH:MM CEST' depending on DST.
+    """
     local_dt = dt.astimezone(TZ)
-
-    tz_name = local_dt.tzname()  # CET of CEST
+    tz_name = local_dt.tzname() or TIMEZONE_NAME
     return f"{local_dt.strftime('%H:%M')} {tz_name}"
 
 
 def daily_key(today: datetime) -> str:
-    return today.strftime("%Y-%m-%d")  # date in TIMEZONE
+    # date key in local timezone
+    return today.strftime("%Y-%m-%d")
 
 
 def make_daily_message(today: datetime, todays_events: list) -> str:
-    # jouw gewenste format: alleen van vandaag
     header = f"📅 **Crypto Craft – HIGH impact (vandaag {today.strftime('%d-%m-%Y')})**"
+
     if not todays_events:
         return header + "\n\nGeen HIGH impact events vandaag."
 
     blocks = []
     for ev, dt in todays_events:
         title = ev.get("title") or ev.get("event") or ev.get("name") or "Event"
-        blocks.append(f"🔥 Impact: HIGH\n⏰ {fmt_time(dt)} {TIMEZONE_NAME}\n📌 {title}")
+        blocks.append(
+            "🔥 Impact: HIGH\n"
+            f"⏰ {fmt_time_local(dt)}\n"
+            f"📌 {title}"
+        )
+
     return header + "\n\n" + "\n\n".join(blocks)
 
 
@@ -158,8 +175,8 @@ def make_reminder_message(ev: dict, dt: datetime) -> str:
     title = ev.get("title") or ev.get("event") or ev.get("name") or "Event"
     return (
         "⏰ **REMINDER (30 min)**\n\n"
-        f"🔥 Impact: HIGH\n"
-        f"⏰ {fmt_time(dt)} {TIMEZONE_NAME}\n"
+        "🔥 Impact: HIGH\n"
+        f"⏰ {fmt_time_local(dt)}\n"
         f"📌 {title}"
     )
 
@@ -167,26 +184,26 @@ def make_reminder_message(ev: dict, dt: datetime) -> str:
 def main():
     now = datetime.now(TZ)
 
-    # Begin en einde van vandaag (in jouw TIMEZONE)
+    # Today range in local TZ
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
 
-    # Laad state
+    # Load state
     state = load_state()
     reminded = set(state.get("reminded", []))
     daily_sent = set(state.get("daily_sent", []))
 
-    # Haal events op
+    # Fetch events
     obj = fetch_json(JSON_URL)
     events = get_events(obj)
 
-    # Filter: alleen HIGH impact + alleen vandaag
+    # Filter: HIGH impact + today only
     todays_high = []
     for ev in events:
         if normalize_impact(ev) != "HIGH":
             continue
 
-        dt = parse_dt(ev)
+        dt = parse_dt_local(ev)
         if dt is None:
             continue
 
@@ -195,40 +212,31 @@ def main():
 
         todays_high.append((ev, dt))
 
-    # Sorteer events op tijd
+    # Sort by time
     todays_high.sort(key=lambda x: x[1])
 
-    # -------------------------------------------------
-    # 1️⃣ DAGPOST — 1× per dag na 00:01 (jouw TIMEZONE)
-    # -------------------------------------------------
-    day_key = daily_key(now)
-
-    if day_key not in daily_sent and now >= today_start + timedelta(minutes=1):
+    # 1) Daily post: 1× per day after 00:01 local time
+    key = daily_key(now)
+    if key not in daily_sent and now >= (today_start + timedelta(minutes=DAILY_AFTER_MINUTES)):
         post_discord(make_daily_message(now, todays_high))
-        daily_sent.add(day_key)
+        daily_sent.add(key)
 
-    # -------------------------------------------------
-    # 2️⃣ REMINDERS — 30 minuten vooraf (HIGH only)
-    # -------------------------------------------------
-    window_start = now
-    window_end = now + timedelta(minutes=RUN_WINDOW_MINUTES)
-
+    # 2) Reminders: catch-up proof window
+    # If Actions runs late, we still send the reminder within RUN_WINDOW_MINUTES after remind_at.
     for ev, dt in todays_high:
         uid = event_uid(ev)
-        remind_at = dt - timedelta(minutes=REMINDER_MINUTES)
-
         if uid in reminded:
             continue
 
-        if window_start <= remind_at < window_end:
+        remind_at = dt - timedelta(minutes=REMINDER_MINUTES)
+        if remind_at <= now < (remind_at + timedelta(minutes=RUN_WINDOW_MINUTES)):
             post_discord(make_reminder_message(ev, dt))
             reminded.add(uid)
 
-    # Sla state op
+    # Save state
     state["reminded"] = sorted(reminded)
     state["daily_sent"] = sorted(daily_sent)
     save_state(state)
-
 
 
 if __name__ == "__main__":
