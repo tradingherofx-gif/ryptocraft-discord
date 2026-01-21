@@ -130,8 +130,11 @@ def event_uid(ev: dict) -> str:
 
 
 def fmt_time(dt: datetime) -> str:
-    # Toon tijd in jouw TIMEZONE (bv. Europe/Amsterdam)
-    return dt.strftime("%H:%M")
+    # Toon lokale NL-tijd + CET/CEST automatisch
+    local_dt = dt.astimezone(TZ)
+
+    tz_name = local_dt.tzname()  # CET of CEST
+    return f"{local_dt.strftime('%H:%M')} {tz_name}"
 
 
 def daily_key(today: datetime) -> str:
