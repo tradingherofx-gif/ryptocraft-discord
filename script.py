@@ -23,14 +23,17 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json").strip()
 
 # Reminder instellingen
 REMINDER_MINUTES = 30
-RUN_WINDOW_MINUTES = 120  # hoe lang na remind_at we nog mogen sturen
+
+# Hoe lang na "remind_at" we nog mogen versturen als Actions te laat is
+# Zet dit ruim, GitHub Actions schedule kan vaak 20-40 min later starten
+RUN_WINDOW_MINUTES = 120
 
 # Daily post: 1× per dag NA 00:01 lokale tijd
 DAILY_AFTER_MINUTES = 1
 
 # Result post (alleen als 'actual/result/value/outcome' bestaat in de feed)
-RESULT_DELAY_MINUTES = 5   # post resultaat 5 min na event-tijd
-RESULT_WINDOW_MINUTES = 60 # tot 60 min erna nog toegestaan
+RESULT_DELAY_MINUTES = 5    # post resultaat 5 min na event-tijd
+RESULT_WINDOW_MINUTES = 120 # tot 120 min erna nog toegestaan
 
 # Discord limiet
 DISCORD_MAX_LEN = 2000
@@ -39,6 +42,9 @@ DISCORD_MAX_LEN = 2000
 CALENDAR_URL = "https://www.cryptocraft.com/calendar"
 CALENDAR_LINK = f"[Crypto Craft Calendar]({CALENDAR_URL})"
 CALENDAR_LABEL = "Calendar"  # Engels label
+
+# Debug: zet op "0" om uit te zetten
+DEBUG = (os.environ.get("DEBUG", "1").strip() != "0")
 
 
 def tzinfo():
@@ -57,6 +63,7 @@ TZ = tzinfo()
 print("CONFIG_TIMEZONE_NAME:", TIMEZONE_NAME)
 print("CONFIG_TZ:", TZ)
 print("CONFIG_STATE_FILE:", STATE_FILE)
+print("CONFIG_DEBUG:", DEBUG)
 
 
 def fetch_json(url: str):
@@ -112,7 +119,6 @@ def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
-            # backwards compatible: voeg ontbrekende keys toe
             state.setdefault("reminded", [])
             state.setdefault("daily_sent", [])
             state.setdefault("results_sent", [])
@@ -147,7 +153,7 @@ def normalize_impact(ev: dict) -> str:
 def parse_dt_local(ev: dict):
     """
     Parse ISO8601 datetime from the feed and return it in local TZ (Europe/Amsterdam).
-    Assumptie: als tz ontbreekt, interpreteren we het als UTC (zoals je originele code).
+    Assumptie: als tz ontbreekt, interpreteren we het als UTC.
     """
     dt_str = (ev.get("datetime") or ev.get("date") or "").strip()
     if not dt_str:
@@ -193,9 +199,6 @@ def daily_key(today_start: datetime) -> str:
 
 
 def get_actual(ev: dict):
-    """
-    Mogelijke veldnamen voor 'actual' in verschillende feeds.
-    """
     for k in ("actual", "result", "value", "outcome"):
         v = ev.get(k)
         if v is not None and str(v).strip() != "":
@@ -204,9 +207,6 @@ def get_actual(ev: dict):
 
 
 def chunk_messages(blocks: list[str], header: str, include_calendar_link: bool) -> list[str]:
-    """
-    Split een bericht in meerdere Discord-berichten als het te lang wordt.
-    """
     footer = f"\n\n🔗 {CALENDAR_LABEL}: {CALENDAR_LINK}" if include_calendar_link else ""
     msgs = []
     current = header
@@ -238,14 +238,10 @@ def make_daily_messages(today_start: datetime, todays_events: list) -> list[str]
             f"📌 {title}"
         )
 
-    # Daily/standaard bericht bevat WEL de link
     return chunk_messages(blocks, header, include_calendar_link=True)
 
 
 def make_reminder_message(ev: dict, dt: datetime) -> str:
-    """
-    Reminder zonder URL (zoals jij wilt).
-    """
     title = ev.get("title") or ev.get("event") or ev.get("name") or "Event"
     return (
         "⏰ **REMINDER (30 min)**\n\n"
@@ -256,9 +252,6 @@ def make_reminder_message(ev: dict, dt: datetime) -> str:
 
 
 def make_result_message(ev: dict, dt: datetime) -> str:
-    """
-    Resultaatbericht: alleen als 'actual' bestaat. Zonder URL.
-    """
     title = ev.get("title") or ev.get("event") or ev.get("name") or "Event"
     actual = get_actual(ev)
     forecast = (ev.get("forecast") or "").strip()
@@ -276,7 +269,6 @@ def make_result_message(ev: dict, dt: datetime) -> str:
         lines.append(f"📊 Forecast: {forecast}")
     if previous:
         lines.append(f"📉 Previous: {previous}")
-
     return "\n".join(lines)
 
 
@@ -293,7 +285,7 @@ def main():
     daily_sent = set(state.get("daily_sent", []))
     results_sent = set(state.get("results_sent", []))
 
-    # Fetch events (geen Discord-spam bij errors)
+    # Fetch events
     obj = fetch_json(JSON_URL)
     events = get_events(obj)
 
@@ -315,23 +307,26 @@ def main():
     # Sort by time
     todays_high.sort(key=lambda x: x[1])
 
+    # DEBUG: laat zien wat het script "ziet"
+    if DEBUG:
+        print("NOW_LOCAL:", now.isoformat())
+        print("TODAY_START:", today_start.isoformat(), "TODAY_END:", today_end.isoformat())
+        print("TODAYS_HIGH_COUNT:", len(todays_high))
+        for ev, dt in todays_high[:10]:
+            title = ev.get("title") or ev.get("event") or ev.get("name")
+            remind_at = dt - timedelta(minutes=REMINDER_MINUTES)
+            print(
+                "EVENT:", title,
+                "| EVENT_LOCAL:", dt.isoformat(),
+                "| REMIND_AT:", remind_at.isoformat(),
+            )
+
     # 1) Daily post: 1× per day after 00:01 local time
     key = daily_key(today_start)
     if key not in daily_sent and now >= (today_start + timedelta(minutes=DAILY_AFTER_MINUTES)):
         for msg in make_daily_messages(today_start, todays_high):
             post_discord(msg)
         daily_sent.add(key)
-
-    print("NOW_LOCAL:", now.isoformat())
-for ev, dt in todays_high[:5]:
-    title = ev.get("title") or ev.get("event") or ev.get("name")
-    remind_at = dt - timedelta(minutes=REMINDER_MINUTES)
-    print(
-        "EVENT:",
-        title,
-        "| EVENT_LOCAL:", dt.isoformat(),
-        "| REMIND_AT:", remind_at.isoformat(),
-    )
 
     # 2) Reminders: catch-up proof window
     for ev, dt in todays_high:
@@ -341,6 +336,8 @@ for ev, dt in todays_high[:5]:
 
         remind_at = dt - timedelta(minutes=REMINDER_MINUTES)
         if remind_at <= now < (remind_at + timedelta(minutes=RUN_WINDOW_MINUTES)):
+            if DEBUG:
+                print("SENDING_REMINDER_FOR_UID:", uid, "AT_NOW:", now.isoformat())
             post_discord(make_reminder_message(ev, dt))
             reminded.add(uid)
 
@@ -356,6 +353,8 @@ for ev, dt in todays_high[:5]:
 
         result_at = dt + timedelta(minutes=RESULT_DELAY_MINUTES)
         if result_at <= now < (result_at + timedelta(minutes=RESULT_WINDOW_MINUTES)):
+            if DEBUG:
+                print("SENDING_RESULT_FOR_UID:", uid, "AT_NOW:", now.isoformat())
             post_discord(make_result_message(ev, dt))
             results_sent.add(uid)
 
