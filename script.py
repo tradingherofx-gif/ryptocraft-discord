@@ -231,7 +231,6 @@ def make_reminder_message(ev: dict, dt: datetime) -> str:
         "🔥 Impact: HIGH\n"
         f"⏰ {fmt_time_local(dt)}\n"
         f"📌 {title}\n\n"
-        f"🔗 Calendar: {CALENDAR_URL}"
     )
 
 
