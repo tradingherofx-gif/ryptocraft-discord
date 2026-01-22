@@ -5,33 +5,37 @@ on:
     - cron: "*/5 * * * *"   # elke 5 minuten (UTC)
   workflow_dispatch:
 
+permissions:
+  contents: write  # nodig om state.json terug te pushen
+
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Restore state cache
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: state-${{ github.repository }}-${{ github.run_id }}
-          restore-keys: state-${{ github.repository }}-
 
       - name: Run script
         env:
           CRYPTOCRAFT_JSON_URL: ${{ secrets.CRYPTOCRAFT_JSON_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          # Optioneel: zet TIMEZONE als secret, bv. Europe/Amsterdam
-          TIMEZONE: ${{ secrets.TIMEZONE }}
+          TIMEZONE: ${{ secrets.TIMEZONE || 'Europe/Amsterdam' }}
+          STATE_FILE: state.json
         run: python script.py
 
-      - name: Save state cache
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: state-${{ github.repository }}-${{ github.run_id }}
+      - name: Commit updated state.json (if changed)
+        run: |
+          if git status --porcelain | grep -q "state.json"; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "Update state.json"
+            git push
+          else
+            echo "No state.json changes"
+          fi
