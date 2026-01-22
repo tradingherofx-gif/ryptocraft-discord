@@ -15,15 +15,16 @@ except Exception:
 JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"]
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 
+# Default nu naar Europe/Amsterdam (zodat je nooit per ongeluk UTC krijgt)
 # Zet dit als GitHub Secret: TIMEZONE = Europe/Amsterdam
-TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "UTC").strip()
+TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "Europe/Amsterdam").strip()
 
 STATE_FILE = "state.json"
 
 REMINDER_MINUTES = 30
 
 # Hoe lang na "remind_at" we nog mogen versturen als Actions te laat is
-# Zet dit >= jouw workflow interval (bv 15 als cron */5 of */10 of */15)
+# Zet dit >= jouw workflow interval
 RUN_WINDOW_MINUTES = 20
 
 # Daily post: 1× per dag NA 00:01 lokale tijd
@@ -34,6 +35,7 @@ def tzinfo():
     if TIMEZONE_NAME.upper() == "UTC":
         return timezone.utc
     if ZoneInfo is None:
+        # fallback
         return timezone.utc
     try:
         return ZoneInfo(TIMEZONE_NAME)
@@ -42,6 +44,10 @@ def tzinfo():
 
 
 TZ = tzinfo()
+
+# Handige debug in Actions logs (geen Discord-bericht)
+print("CONFIG_TIMEZONE_NAME:", TIMEZONE_NAME)
+print("CONFIG_TZ:", TZ)
 
 
 def fetch_json(url: str):
@@ -142,10 +148,13 @@ def event_uid(ev: dict) -> str:
 def fmt_time_local(dt: datetime) -> str:
     """
     Returns 'HH:MM CET' or 'HH:MM CEST' depending on DST.
+    Forceert CET/CEST labels zodat je nooit 'UTC' in de output krijgt als de timezone goed is.
     """
     local_dt = dt.astimezone(TZ)
-    tz_name = local_dt.tzname() or TIMEZONE_NAME
-    return f"{local_dt.strftime('%H:%M')} {tz_name}"
+    # +0100 / +0200 -> CET / CEST
+    offset = local_dt.strftime("%z")
+    tz_label = "CEST" if offset == "+0200" else "CET"
+    return f"{local_dt.strftime('%H:%M')} {tz_label}"
 
 
 def daily_key(today: datetime) -> str:
@@ -222,7 +231,6 @@ def main():
         daily_sent.add(key)
 
     # 2) Reminders: catch-up proof window
-    # If Actions runs late, we still send the reminder within RUN_WINDOW_MINUTES after remind_at.
     for ev, dt in todays_high:
         uid = event_uid(ev)
         if uid in reminded:
