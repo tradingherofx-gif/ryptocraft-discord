@@ -23,7 +23,7 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json").strip()
 
 # Reminder instellingen
 REMINDER_MINUTES = 30
-RUN_WINDOW_MINUTES = 20  # hoe lang na remind_at we nog mogen sturen
+RUN_WINDOW_MINUTES = 120  # hoe lang na remind_at we nog mogen sturen
 
 # Daily post: 1× per dag NA 00:01 lokale tijd
 DAILY_AFTER_MINUTES = 1
@@ -321,6 +321,17 @@ def main():
         for msg in make_daily_messages(today_start, todays_high):
             post_discord(msg)
         daily_sent.add(key)
+
+    print("NOW_LOCAL:", now.isoformat())
+for ev, dt in todays_high[:5]:
+    title = ev.get("title") or ev.get("event") or ev.get("name")
+    remind_at = dt - timedelta(minutes=REMINDER_MINUTES)
+    print(
+        "EVENT:",
+        title,
+        "| EVENT_LOCAL:", dt.isoformat(),
+        "| REMIND_AT:", remind_at.isoformat(),
+    )
 
     # 2) Reminders: catch-up proof window
     for ev, dt in todays_high:
