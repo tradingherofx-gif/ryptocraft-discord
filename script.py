@@ -11,29 +11,34 @@ try:
 except Exception:
     ZoneInfo = None
 
-
 # ---- Secrets / Config ----
 JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"]
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 
+# Default naar Europe/Amsterdam
 TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "Europe/Amsterdam").strip()
 
-# Waar we state opslaan (handig als je later cache-pad wilt aanpassen)
+# State file (handig als je dit later wil verplaatsen)
 STATE_FILE = os.environ.get("STATE_FILE", "state.json").strip()
 
+# Reminder instellingen
 REMINDER_MINUTES = 30
-
-# Hoe lang na "remind_at" we nog mogen versturen als Actions te laat is
-RUN_WINDOW_MINUTES = 20
+RUN_WINDOW_MINUTES = 20  # hoe lang na remind_at we nog mogen sturen
 
 # Daily post: 1× per dag NA 00:01 lokale tijd
 DAILY_AFTER_MINUTES = 1
 
+# Result post (alleen als 'actual/result/value/outcome' bestaat in de feed)
+RESULT_DELAY_MINUTES = 5   # post resultaat 5 min na event-tijd
+RESULT_WINDOW_MINUTES = 60 # tot 60 min erna nog toegestaan
+
 # Discord limiet
 DISCORD_MAX_LEN = 2000
 
-# Link die altijd mee moet
+# Link: alleen in daily/standaard bericht (niet in reminders / results)
 CALENDAR_URL = "https://www.cryptocraft.com/calendar"
+CALENDAR_LINK = f"[Crypto Craft Calendar]({CALENDAR_URL})"
+CALENDAR_LABEL = "Calendar"  # Engels label
 
 
 def tzinfo():
@@ -106,11 +111,16 @@ def post_discord(content: str, max_retries: int = 8):
 def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+            # backwards compatible: voeg ontbrekende keys toe
+            state.setdefault("reminded", [])
+            state.setdefault("daily_sent", [])
+            state.setdefault("results_sent", [])
+            return state
     except FileNotFoundError:
-        return {"reminded": [], "daily_sent": []}
+        return {"reminded": [], "daily_sent": [], "results_sent": []}
     except Exception:
-        return {"reminded": [], "daily_sent": []}
+        return {"reminded": [], "daily_sent": [], "results_sent": []}
 
 
 def save_state(state: dict):
@@ -137,7 +147,7 @@ def normalize_impact(ev: dict) -> str:
 def parse_dt_local(ev: dict):
     """
     Parse ISO8601 datetime from the feed and return it in local TZ (Europe/Amsterdam).
-    Assumptie: als tz ontbreekt, interpreteren we het als UTC (zoals je oude code).
+    Assumptie: als tz ontbreekt, interpreteren we het als UTC (zoals je originele code).
     """
     dt_str = (ev.get("datetime") or ev.get("date") or "").strip()
     if not dt_str:
@@ -166,15 +176,13 @@ def event_uid(ev: dict) -> str:
 
 def fmt_time_local(dt: datetime) -> str:
     """
-    Returns 'HH:MM CET/CEST' (of fallback op tzname als dat anders is).
+    Returns 'HH:MM CET/CEST' (of fallback op offset mapping).
     """
     local_dt = dt.astimezone(TZ)
     tzname = local_dt.tzname() or ""
-    # Veelal: 'CET' of 'CEST' op Europe/Amsterdam
     if tzname in ("CET", "CEST"):
         label = tzname
     else:
-        # fallback naar offset-based CET/CEST voor Amsterdam-achtige offsets
         offset = local_dt.strftime("%z")
         label = "CEST" if offset == "+0200" else "CET"
     return f"{local_dt.strftime('%H:%M')} {label}"
@@ -184,19 +192,28 @@ def daily_key(today_start: datetime) -> str:
     return today_start.strftime("%Y-%m-%d")
 
 
-def chunk_messages(lines: list[str], header: str) -> list[str]:
+def get_actual(ev: dict):
     """
-    Split een daily post in meerdere Discord-berichten als het te lang wordt.
-    We nemen een vaste footer met link mee in elk bericht.
+    Mogelijke veldnamen voor 'actual' in verschillende feeds.
     """
-    footer = f"\n\n🔗 Calendar: {CALENDAR_URL}"
+    for k in ("actual", "result", "value", "outcome"):
+        v = ev.get(k)
+        if v is not None and str(v).strip() != "":
+            return str(v).strip()
+    return None
+
+
+def chunk_messages(blocks: list[str], header: str, include_calendar_link: bool) -> list[str]:
+    """
+    Split een bericht in meerdere Discord-berichten als het te lang wordt.
+    """
+    footer = f"\n\n🔗 {CALENDAR_LABEL}: {CALENDAR_LINK}" if include_calendar_link else ""
     msgs = []
     current = header
 
-    for block in lines:
+    for block in blocks:
         candidate = current + "\n\n" + block + footer
         if len(candidate) > DISCORD_MAX_LEN:
-            # finalize current
             msgs.append(current + footer)
             current = header + "\n\n" + block
         else:
@@ -210,7 +227,7 @@ def make_daily_messages(today_start: datetime, todays_events: list) -> list[str]
     header = f"📅 **Crypto Craft – HIGH impact (vandaag {today_start.strftime('%d-%m-%Y')})**"
 
     if not todays_events:
-        return [header + f"\n\nGeen HIGH impact events vandaag.\n\n🔗 Kalender: {CALENDAR_URL}"]
+        return [header + f"\n\nGeen HIGH impact events vandaag.\n\n🔗 {CALENDAR_LABEL}: {CALENDAR_LINK}"]
 
     blocks = []
     for ev, dt in todays_events:
@@ -221,17 +238,46 @@ def make_daily_messages(today_start: datetime, todays_events: list) -> list[str]
             f"📌 {title}"
         )
 
-    return chunk_messages(blocks, header)
+    # Daily/standaard bericht bevat WEL de link
+    return chunk_messages(blocks, header, include_calendar_link=True)
 
 
 def make_reminder_message(ev: dict, dt: datetime) -> str:
+    """
+    Reminder zonder URL (zoals jij wilt).
+    """
     title = ev.get("title") or ev.get("event") or ev.get("name") or "Event"
     return (
         "⏰ **REMINDER (30 min)**\n\n"
         "🔥 Impact: HIGH\n"
         f"⏰ {fmt_time_local(dt)}\n"
-        f"📌 {title}\n\n"
+        f"📌 {title}"
     )
+
+
+def make_result_message(ev: dict, dt: datetime) -> str:
+    """
+    Resultaatbericht: alleen als 'actual' bestaat. Zonder URL.
+    """
+    title = ev.get("title") or ev.get("event") or ev.get("name") or "Event"
+    actual = get_actual(ev)
+    forecast = (ev.get("forecast") or "").strip()
+    previous = (ev.get("previous") or "").strip()
+
+    lines = [
+        "📊 **RESULT – HIGH impact**",
+        "",
+        f"📌 {title}",
+        f"⏰ {fmt_time_local(dt)}",
+        "",
+        f"📈 Actual: {actual}",
+    ]
+    if forecast:
+        lines.append(f"📊 Forecast: {forecast}")
+    if previous:
+        lines.append(f"📉 Previous: {previous}")
+
+    return "\n".join(lines)
 
 
 def main():
@@ -245,15 +291,10 @@ def main():
     state = load_state()
     reminded = set(state.get("reminded", []))
     daily_sent = set(state.get("daily_sent", []))
+    results_sent = set(state.get("results_sent", []))
 
-    # Fetch events (met nette error logging)
-    try:
-        obj = fetch_json(JSON_URL)
-    except Exception as e:
-        print("ERROR_FETCH_JSON:", str(e))
-        # Fail hard zodat Actions het ziet (maar geen Discord spam)
-        raise
-
+    # Fetch events (geen Discord-spam bij errors)
+    obj = fetch_json(JSON_URL)
     events = get_events(obj)
 
     # Filter: HIGH impact + today only
@@ -277,8 +318,7 @@ def main():
     # 1) Daily post: 1× per day after 00:01 local time
     key = daily_key(today_start)
     if key not in daily_sent and now >= (today_start + timedelta(minutes=DAILY_AFTER_MINUTES)):
-        daily_msgs = make_daily_messages(today_start, todays_high)
-        for msg in daily_msgs:
+        for msg in make_daily_messages(today_start, todays_high):
             post_discord(msg)
         daily_sent.add(key)
 
@@ -293,9 +333,25 @@ def main():
             post_discord(make_reminder_message(ev, dt))
             reminded.add(uid)
 
+    # 3) Result posts (alleen als 'actual' bestaat)
+    for ev, dt in todays_high:
+        uid = event_uid(ev)
+        if uid in results_sent:
+            continue
+
+        actual = get_actual(ev)
+        if not actual:
+            continue  # nog geen resultaat in de feed
+
+        result_at = dt + timedelta(minutes=RESULT_DELAY_MINUTES)
+        if result_at <= now < (result_at + timedelta(minutes=RESULT_WINDOW_MINUTES)):
+            post_discord(make_result_message(ev, dt))
+            results_sent.add(uid)
+
     # Save state
     state["reminded"] = sorted(reminded)
     state["daily_sent"] = sorted(daily_sent)
+    state["results_sent"] = sorted(results_sent)
     save_state(state)
 
 
