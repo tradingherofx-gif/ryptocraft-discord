@@ -189,7 +189,7 @@ def chunk_messages(lines: list[str], header: str) -> list[str]:
     Split een daily post in meerdere Discord-berichten als het te lang wordt.
     We nemen een vaste footer met link mee in elk bericht.
     """
-    footer = f"\n\n🔗 Kalender: {CALENDAR_URL}"
+    footer = f"\n\n🔗 Calendar: {CALENDAR_URL}"
     msgs = []
     current = header
 
@@ -219,7 +219,6 @@ def make_daily_messages(today_start: datetime, todays_events: list) -> list[str]
             "🔥 Impact: HIGH\n"
             f"⏰ {fmt_time_local(dt)}\n"
             f"📌 {title}"
-            f"🔗 Calendar: {CALENDAR_URL}"
         )
 
     return chunk_messages(blocks, header)
