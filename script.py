@@ -41,7 +41,7 @@ DISCORD_MAX_LEN = 2000
 
 # Link: alleen in daily/standaard bericht (niet in reminders / results)
 CALENDAR_URL = "https://www.cryptocraft.com/calendar"
-CALENDAR_LINK = f"[Crypto Craft Calendar]({CALENDAR_URL})"
+CALENDAR_LINK = f"[Crypto Craft]({CALENDAR_URL})"
 CALENDAR_LABEL = "Calendar"  # Engels label
 
 # Debug: zet op "0" om uit te zetten
