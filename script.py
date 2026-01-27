@@ -188,7 +188,7 @@ def main():
     todays_high.sort(key=lambda x: x[1])
 
     key = today_start.strftime("%Y-%m-%d")
-    display_date = today_start.strftime("%d-%m-%Y")
+    display_date = now.strftime("%d-%m-%Y")
     if key not in daily_sent and now >= today_start + timedelta(minutes=DAILY_AFTER_MINUTES):
         if todays_high:
             blocks = [
@@ -196,6 +196,8 @@ def main():
                 for ev, dt in todays_high
             ]
         else:
+            blocks = ["Geen HIGH impact events vandaag."]
+        if not blocks:
             blocks = ["Geen HIGH impact events vandaag."]
         for msg in chunk_messages(blocks, f"📅 **Crypto Craft – HIGH impact ({display_date})**"):
             post_discord(msg)
