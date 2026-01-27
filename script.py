@@ -25,6 +25,8 @@ DAILY_AFTER_MINUTES = 1
 
 RESULT_DELAY_MINUTES = 5
 RESULT_WINDOW_MINUTES = 120
+WEEKLY_AFTER_MINUTES = 23 * 60 + 59
+WEEKLY_WINDOW_MINUTES = 120
 
 DISCORD_MAX_LEN = 2000
 
@@ -94,9 +96,10 @@ def load_state():
             state.setdefault("reminded", [])
             state.setdefault("daily_sent", [])
             state.setdefault("results_sent", [])
+            state.setdefault("weekly_sent", [])
             return state
     except Exception:
-        return {"reminded": [], "daily_sent": [], "results_sent": []}
+        return {"reminded": [], "daily_sent": [], "results_sent": [], "weekly_sent": []}
 
 
 def save_state(state: dict):
@@ -170,6 +173,7 @@ def main():
     reminded = set(state["reminded"])
     daily_sent = set(state["daily_sent"])
     results_sent = set(state["results_sent"])
+    weekly_sent = set(state["weekly_sent"])
 
     events = get_events(fetch_json(JSON_URL))
 
@@ -184,12 +188,18 @@ def main():
     todays_high.sort(key=lambda x: x[1])
 
     key = today_start.strftime("%Y-%m-%d")
+    display_date = now.strftime("%d-%m-%Y")
     if key not in daily_sent and now >= today_start + timedelta(minutes=DAILY_AFTER_MINUTES):
-        blocks = [
-            f"🔥 Impact: HIGH\n⏰ {fmt_time_local(dt)}\n📌 {ev.get('title')}"
-            for ev, dt in todays_high
-        ]
-        for msg in chunk_messages(blocks, f"📅 **Crypto Craft – HIGH impact ({key})**"):
+        if todays_high:
+            blocks = [
+                f"🔥 Impact: HIGH\n⏰ {fmt_time_local(dt)}\n📌 {ev.get('title')}"
+                for ev, dt in todays_high
+            ]
+        else:
+            blocks = ["Geen HIGH impact events vandaag."]
+        if not blocks:
+            blocks = ["Geen HIGH impact events vandaag."]
+        for msg in chunk_messages(blocks, f"📅 **Crypto Craft – HIGH impact ({display_date})**"):
             post_discord(msg)
         daily_sent.add(key)
 
@@ -214,9 +224,44 @@ def main():
                 )
                 results_sent.add(uid)
 
+    weekly_key = today_start.strftime("%G-%V")
+    if (
+        weekly_key not in weekly_sent
+        and now.weekday() == 6
+        and now >= today_start + timedelta(minutes=WEEKLY_AFTER_MINUTES)
+        and now < today_start + timedelta(minutes=WEEKLY_AFTER_MINUTES + WEEKLY_WINDOW_MINUTES)
+    ):
+        week_start = today_start + timedelta(days=1)
+        week_end = week_start + timedelta(days=7)
+        week_start_label = week_start.strftime("%d-%m-%Y")
+        week_end_label = (week_end - timedelta(days=1)).strftime("%d-%m-%Y")
+        upcoming_high = []
+        for ev in events:
+            if normalize_impact(ev) != "HIGH":
+                continue
+            dt = parse_dt_local(ev)
+            if dt and week_start <= dt < week_end:
+                upcoming_high.append((ev, dt))
+        upcoming_high.sort(key=lambda x: x[1])
+        if upcoming_high:
+            blocks = [
+                f"🔥 Impact: HIGH\n⏰ {fmt_time_local(dt)}\n📌 {ev.get('title')}"
+                for ev, dt in upcoming_high
+            ]
+        else:
+            blocks = ["Geen HIGH impact events aankomende week."]
+        header = (
+            f"📅 **Crypto Craft – HIGH impact weekoverzicht "
+            f"({week_start_label} – {week_end_label})**"
+        )
+        for msg in chunk_messages(blocks, header):
+            post_discord(msg)
+        weekly_sent.add(weekly_key)
+
     state["reminded"] = list(reminded)
     state["daily_sent"] = list(daily_sent)
     state["results_sent"] = list(results_sent)
+    state["weekly_sent"] = list(weekly_sent)
     save_state(state)
 
 
