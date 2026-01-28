@@ -72,25 +72,29 @@ def fetch_json(url: str):
 
 def post_discord(content: str, max_retries: int = 8) -> bool:
     payload = json.dumps({"content": content}).encode("utf-8")
-    for _ in range(max_retries):
-        try:
-            req = urllib.request.Request(
-                WEBHOOK,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=30):
-                return True
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                time.sleep(1.5)
-                continue
-            print(f"DISCORD_POST_FAILED: HTTP {e.code}")
-            return False
-        except Exception as e:
-            print(f"DISCORD_POST_FAILED: {e}")
-            return False
+    try:
+        for _ in range(max_retries):
+            try:
+                req = urllib.request.Request(
+                    WEBHOOK,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=30):
+                    return True
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    time.sleep(1.5)
+                    continue
+                print(f"DISCORD_POST_FAILED: HTTP {e.code}")
+                return False
+            except Exception as e:
+                print(f"DISCORD_POST_FAILED: {e}")
+                return False
+    except Exception as e:
+        print(f"DISCORD_POST_FATAL: {e}")
+        return False
     return False
 
 
