@@ -4,6 +4,8 @@ import hashlib
 import urllib.request
 import urllib.error
 import time
+import random
+import ssl
 from datetime import datetime, timezone, timedelta
 
 try:
@@ -13,7 +15,9 @@ except Exception:
 
 # ---- Secrets / Config ----
 JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"]
-WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+
+# Strip is belangrijk: GitHub Secrets kunnen onbedoeld \n/spaties bevatten
+WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"].strip()
 
 TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "Europe/Amsterdam").strip()
 STATE_FILE = os.environ.get("STATE_FILE", "state.json").strip()
@@ -55,6 +59,8 @@ print("CONFIG_TIMEZONE_NAME:", TIMEZONE_NAME)
 print("CONFIG_TZ:", TZ)
 print("CONFIG_STATE_FILE:", STATE_FILE)
 print("CONFIG_DEBUG:", DEBUG)
+print("CONFIG_WEBHOOK_SET:", bool(WEBHOOK))
+print("CONFIG_WEBHOOK_HOST:", (WEBHOOK.split("/")[2] if WEBHOOK else None))
 
 
 def fetch_json(url: str):
@@ -71,22 +77,81 @@ def fetch_json(url: str):
 
 
 def post_discord(content: str, max_retries: int = 8):
+    """
+    Post a message to Discord via webhook.
+    - Logs useful info on HTTP errors (especially 403).
+    - Retries on 429 with backoff.
+    """
+    if not WEBHOOK:
+        raise RuntimeError("DISCORD_WEBHOOK_URL is not set")
+
+    # Zorg dat we nooit over Discord limiet gaan
+    content = (content or "")[:DISCORD_MAX_LEN]
+
     payload = json.dumps({"content": content}).encode("utf-8")
-    for _ in range(max_retries):
+
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
         try:
             req = urllib.request.Request(
                 WEBHOOK,
                 data=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "github-actions-discord-webhook/1.0",
+                },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=30):
+
+            ctx = ssl.create_default_context()
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                if DEBUG:
+                    print(f"✅ Discord webhook OK (status={resp.status})")
                 return
+
         except urllib.error.HTTPError as e:
+            last_exc = e
+
+            # Probeer body te lezen; Discord vertelt hier meestal precies de reden
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+
+            if DEBUG:
+                print(f"❌ Discord HTTPError (attempt {attempt}/{max_retries}): {e.code}")
+                print("❌ Discord headers:", dict(e.headers))
+                if body:
+                    print("❌ Discord body:", body)
+
+            # Rate limit -> retry met backoff
             if e.code == 429:
-                time.sleep(1.5)
+                # Discord kan Retry-After header sturen (seconden)
+                retry_after = None
+                try:
+                    retry_after = e.headers.get("Retry-After")
+                except Exception:
+                    retry_after = None
+
+                try:
+                    wait_s = float(retry_after) if retry_after else (1.5 + attempt * 0.75 + random.random())
+                except Exception:
+                    wait_s = 2.0 + attempt
+
+                time.sleep(min(wait_s, 30))
                 continue
-            raise
+
+            # Voor 403/400/401 etc: niet blijven retrypen, maar falen met duidelijke info
+            raise RuntimeError(f"Discord webhook failed ({e.code}). Body: {body}") from e
+
+        except Exception as e:
+            last_exc = e
+            if DEBUG:
+                print(f"❌ Discord onverwachte fout (attempt {attempt}/{max_retries}): {repr(e)}")
+            # Kleine backoff voor tijdelijke netwerk issues
+            time.sleep(min(1.0 + attempt * 0.5, 10))
+
+    raise RuntimeError(f"Discord webhook failed after {max_retries} attempts: {repr(last_exc)}") from last_exc
 
 
 def load_state():
@@ -132,10 +197,13 @@ def parse_dt_local(ev):
 
 
 def event_uid(ev):
-    raw = json.dumps({
-        "title": ev.get("title"),
-        "datetime": ev.get("datetime") or ev.get("date"),
-    }, sort_keys=True)
+    raw = json.dumps(
+        {
+            "title": ev.get("title"),
+            "datetime": ev.get("datetime") or ev.get("date"),
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
