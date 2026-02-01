@@ -35,7 +35,7 @@ DAILY_RESULTS_HOUR = 23
 DAILY_RESULTS_MINUTE = 0
 DAILY_RESULTS_WINDOW_MINUTES = 120  # 23:00 t/m 01:00
 
-# Weekly overzicht (zoals je al had)
+# Weekly overzicht
 WEEKLY_AFTER_MINUTES = 23 * 60 + 59
 WEEKLY_WINDOW_MINUTES = 120
 
@@ -216,24 +216,62 @@ def fmt_time_local(dt):
 
 
 def get_actual(ev):
-    for k in ("actual", "result", "value", "outcome"):
-        if ev.get(k) is not None and ev.get(k) != "":
-            return str(ev[k])
+    """
+    Robuuste actual extractor:
+    - pakt meerdere key-varianten (case + synoniemen)
+    - pakt ook nested dicts (data/meta/stats/values/event)
+    """
+    direct_keys = (
+        "actual", "Actual",
+        "result", "Result",
+        "value", "Value",
+        "outcome", "Outcome",
+        "reading", "Reading",
+        "actualValue", "actual_value",
+        "act", "Act",
+    )
+    for k in direct_keys:
+        v = ev.get(k)
+        if v is not None and v != "":
+            return str(v)
+
+    nested_parents = ("data", "meta", "stats", "values", "event")
+    nested_keys = (
+        "actual", "Actual",
+        "result", "Result",
+        "value", "Value",
+        "outcome", "Outcome",
+        "reading", "Reading",
+        "actualValue", "actual_value",
+        "act", "Act",
+    )
+    for p in nested_parents:
+        obj = ev.get(p)
+        if isinstance(obj, dict):
+            for k in nested_keys:
+                v = obj.get(k)
+                if v is not None and v != "":
+                    return str(v)
+
     return None
 
 
 def get_forecast(ev):
     # Probeer meerdere mogelijke veldnamen (verschillende JSON varianten)
-    for k in ("forecast", "consensus", "estimate", "expected"):
-        if ev.get(k) is not None and ev.get(k) != "":
-            return str(ev[k])
+    for k in ("forecast", "Forecast", "consensus", "Consensus", "estimate", "Estimate", "expected", "Expected"):
+        v = ev.get(k)
+        if v is not None and v != "":
+            return str(v)
+
     # Soms staat het in nested objecten
-    for k in ("data", "meta", "stats"):
-        obj = ev.get(k)
+    for p in ("data", "meta", "stats", "values", "event"):
+        obj = ev.get(p)
         if isinstance(obj, dict):
-            for kk in ("forecast", "consensus", "estimate", "expected"):
-                if obj.get(kk) is not None and obj.get(kk) != "":
-                    return str(obj[kk])
+            for k in ("forecast", "Forecast", "consensus", "Consensus", "estimate", "Estimate", "expected", "Expected"):
+                v = obj.get(k)
+                if v is not None and v != "":
+                    return str(v)
+
     return None
 
 
@@ -291,8 +329,6 @@ def main():
             ]
         else:
             blocks = ["Geen HIGH impact events vandaag."]
-        if not blocks:
-            blocks = ["Geen HIGH impact events vandaag."]
         for msg in chunk_messages(blocks, f"📅 **Crypto Craft – HIGH impact ({display_date})**"):
             post_discord(msg)
         daily_sent.add(key)
@@ -303,10 +339,7 @@ def main():
     if reminder_key not in reminded:
         if reminder_time <= now < reminder_time + timedelta(minutes=DAILY_REMINDER_WINDOW_MINUTES):
             if todays_high:
-                blocks = [
-                    f"⏰ {fmt_time_local(dt)}\n📌 {ev.get('title')}"
-                    for ev, dt in todays_high
-                ]
+                blocks = [f"⏰ {fmt_time_local(dt)}\n📌 {ev.get('title')}" for ev, dt in todays_high]
                 header = f"⏰ **Dag reminder – HIGH impact vandaag ({display_date})**"
                 for msg in chunk_messages(blocks, header):
                     post_discord(msg)
@@ -366,7 +399,6 @@ def main():
         upcoming_high.sort(key=lambda x: x[1])
 
         if upcoming_high:
-            # groepeer per dag
             grouped = {}
             for ev, dt in upcoming_high:
                 day_key = dt.date().isoformat()
