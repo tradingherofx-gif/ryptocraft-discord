@@ -22,7 +22,7 @@ WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"].strip()
 TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "Europe/Amsterdam").strip()
 STATE_FILE = os.environ.get("STATE_FILE", "state.json").strip()
 
-# Daily lijst (zoals je al had)
+# Dagoverzicht
 DAILY_AFTER_MINUTES = 1
 
 # Reminder: 1x tussen 10:00-11:00
@@ -35,9 +35,10 @@ DAILY_RESULTS_HOUR = 23
 DAILY_RESULTS_MINUTE = 0
 DAILY_RESULTS_WINDOW_MINUTES = 120  # 23:00 t/m 01:00
 
-# Weekly overzicht
-WEEKLY_AFTER_MINUTES = 23 * 60 + 59
-WEEKLY_WINDOW_MINUTES = 120
+# Weekly overzicht: hele zondag (zodat je cron niet perfect hoeft te zijn)
+WEEKLY_SEND_HOUR = 0
+WEEKLY_SEND_MINUTE = 0
+WEEKLY_SEND_WINDOW_MINUTES = 24 * 60  # hele zondag
 
 DISCORD_MAX_LEN = 2000
 
@@ -92,9 +93,7 @@ def post_discord(content: str, max_retries: int = 8):
     if not WEBHOOK:
         raise RuntimeError("DISCORD_WEBHOOK_URL is not set")
 
-    # Zorg dat we nooit over Discord limiet gaan
     content = (content or "")[:DISCORD_MAX_LEN]
-
     payload = json.dumps({"content": content}).encode("utf-8")
 
     last_exc = None
@@ -118,8 +117,6 @@ def post_discord(content: str, max_retries: int = 8):
 
         except urllib.error.HTTPError as e:
             last_exc = e
-
-            # Probeer body te lezen; Discord vertelt hier meestal precies de reden
             try:
                 body = e.read().decode("utf-8", errors="replace")
             except Exception:
@@ -131,7 +128,6 @@ def post_discord(content: str, max_retries: int = 8):
                 if body:
                     print("❌ Discord body:", body)
 
-            # Rate limit -> retry met backoff
             if e.code == 429:
                 retry_after = None
                 try:
@@ -200,26 +196,13 @@ def parse_dt_local(ev):
     return dt.astimezone(TZ)
 
 
-def event_uid(ev):
-    raw = json.dumps(
-        {
-            "title": ev.get("title"),
-            "datetime": ev.get("datetime") or ev.get("date"),
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
-
-
 def fmt_time_local(dt):
     return f"{dt.strftime('%H:%M')} {dt.tzname()}"
 
 
 def get_actual(ev):
     """
-    Robuuste actual extractor:
-    - pakt meerdere key-varianten (case + synoniemen)
-    - pakt ook nested dicts (data/meta/stats/values/event)
+    Robuuste actual extractor (direct + nested + varianten).
     """
     direct_keys = (
         "actual", "Actual",
@@ -236,15 +219,7 @@ def get_actual(ev):
             return str(v)
 
     nested_parents = ("data", "meta", "stats", "values", "event")
-    nested_keys = (
-        "actual", "Actual",
-        "result", "Result",
-        "value", "Value",
-        "outcome", "Outcome",
-        "reading", "Reading",
-        "actualValue", "actual_value",
-        "act", "Act",
-    )
+    nested_keys = direct_keys
     for p in nested_parents:
         obj = ev.get(p)
         if isinstance(obj, dict):
@@ -257,17 +232,24 @@ def get_actual(ev):
 
 
 def get_forecast(ev):
-    # Probeer meerdere mogelijke veldnamen (verschillende JSON varianten)
-    for k in ("forecast", "Forecast", "consensus", "Consensus", "estimate", "Estimate", "expected", "Expected"):
+    """
+    Robuuste forecast extractor (direct + nested + varianten).
+    """
+    direct_keys = (
+        "forecast", "Forecast",
+        "consensus", "Consensus",
+        "estimate", "Estimate",
+        "expected", "Expected",
+    )
+    for k in direct_keys:
         v = ev.get(k)
         if v is not None and v != "":
             return str(v)
 
-    # Soms staat het in nested objecten
     for p in ("data", "meta", "stats", "values", "event"):
         obj = ev.get(p)
         if isinstance(obj, dict):
-            for k in ("forecast", "Forecast", "consensus", "Consensus", "estimate", "Estimate", "expected", "Expected"):
+            for k in direct_keys:
                 v = obj.get(k)
                 if v is not None and v != "":
                     return str(v)
@@ -320,7 +302,12 @@ def main():
     key = today_start.strftime("%Y-%m-%d")
     display_date = now.strftime("%d-%m-%Y")
 
-    # --- Daily lijst (ongewijzigd) ---
+    if DEBUG:
+        print("DEBUG_NOW:", now.isoformat())
+        print("DEBUG_WEEKDAY:", now.weekday(), "(zondag=6)")
+        print("DEBUG_TODAYS_HIGH_COUNT:", len(todays_high))
+
+    # --- Dagoverzicht ---
     if key not in daily_sent and now >= today_start + timedelta(minutes=DAILY_AFTER_MINUTES):
         if todays_high:
             blocks = [
@@ -329,6 +316,7 @@ def main():
             ]
         else:
             blocks = ["Geen HIGH impact events vandaag."]
+
         for msg in chunk_messages(blocks, f"📅 **Crypto Craft – HIGH impact ({display_date})**"):
             post_discord(msg)
         daily_sent.add(key)
@@ -336,6 +324,11 @@ def main():
     # --- 1x Dag reminder (10:00-11:00) ---
     reminder_key = f"reminder-{key}"
     reminder_time = today_start.replace(hour=DAILY_REMINDER_HOUR, minute=DAILY_REMINDER_MINUTE)
+    if DEBUG:
+        print("DEBUG_REMINDER_KEY:", reminder_key, "already_sent=", reminder_key in reminded)
+        print("DEBUG_REMINDER_WINDOW:", reminder_time.isoformat(), "to",
+              (reminder_time + timedelta(minutes=DAILY_REMINDER_WINDOW_MINUTES)).isoformat())
+
     if reminder_key not in reminded:
         if reminder_time <= now < reminder_time + timedelta(minutes=DAILY_REMINDER_WINDOW_MINUTES):
             if todays_high:
@@ -350,6 +343,11 @@ def main():
     # --- 1x Daguitslag (23:00) met Forecast + Actual ---
     results_key = f"results-{key}"
     results_time = today_start.replace(hour=DAILY_RESULTS_HOUR, minute=DAILY_RESULTS_MINUTE)
+    if DEBUG:
+        print("DEBUG_RESULTS_KEY:", results_key, "already_sent=", results_key in results_sent)
+        print("DEBUG_RESULTS_WINDOW:", results_time.isoformat(), "to",
+              (results_time + timedelta(minutes=DAILY_RESULTS_WINDOW_MINUTES)).isoformat())
+
     if results_key not in results_sent:
         if results_time <= now < results_time + timedelta(minutes=DAILY_RESULTS_WINDOW_MINUTES):
             if todays_high:
@@ -375,17 +373,22 @@ def main():
                 post_discord(f"📊 **Daguitslag ({display_date})**\n\nGeen HIGH impact events vandaag.")
             results_sent.add(results_key)
 
-    # --- Weekly overzicht met daglabels ---
+    # --- Weekly overzicht met daglabels (hele zondag window) ---
     weekly_key = today_start.strftime("%G-%V")
+    weekly_time = today_start.replace(hour=WEEKLY_SEND_HOUR, minute=WEEKLY_SEND_MINUTE)
+    weekly_end = weekly_time + timedelta(minutes=WEEKLY_SEND_WINDOW_MINUTES)
+
+    if DEBUG:
+        print("DEBUG_WEEKLY_KEY:", weekly_key, "already_sent=", weekly_key in weekly_sent)
+        print("DEBUG_WEEKLY_WINDOW:", weekly_time.isoformat(), "to", weekly_end.isoformat())
+
     if (
         weekly_key not in weekly_sent
         and now.weekday() == 6
-        and now >= today_start + timedelta(minutes=WEEKLY_AFTER_MINUTES)
-        and now < today_start + timedelta(minutes=WEEKLY_AFTER_MINUTES + WEEKLY_WINDOW_MINUTES)
+        and weekly_time <= now < weekly_end
     ):
-        week_start = today_start + timedelta(days=1)
-        week_end = week_start + timedelta(days=7)
-
+        week_start = today_start + timedelta(days=1)   # maandag
+        week_end = week_start + timedelta(days=7)      # volgende maandag
         week_start_label = week_start.strftime("%d-%m-%Y")
         week_end_label = (week_end - timedelta(days=1)).strftime("%d-%m-%Y")
 
@@ -399,6 +402,7 @@ def main():
         upcoming_high.sort(key=lambda x: x[1])
 
         if upcoming_high:
+            # groepeer per dag
             grouped = {}
             for ev, dt in upcoming_high:
                 day_key = dt.date().isoformat()
