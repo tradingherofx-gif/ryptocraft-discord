@@ -15,39 +15,37 @@ except Exception:
 
 # ---- Secrets / Config ----
 JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"]
-
-# Strip is belangrijk: GitHub Secrets kunnen onbedoeld \n/spaties bevatten
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"].strip()
 
 TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "Europe/Amsterdam").strip()
 STATE_FILE = os.environ.get("STATE_FILE", "state.json").strip()
 
-# Dagoverzicht
-DAILY_AFTER_MINUTES = 1
-
-# Reminder: 1x tussen 10:00-11:00
-DAILY_REMINDER_HOUR = 10
-DAILY_REMINDER_MINUTE = 0
-DAILY_REMINDER_WINDOW_MINUTES = 60  # 10:00 t/m 11:00
-
-# Daguitslag: 1x rond 23:00
-DAILY_RESULTS_HOUR = 23
-DAILY_RESULTS_MINUTE = 0
-DAILY_RESULTS_WINDOW_MINUTES = 120  # 23:00 t/m 01:00
-
-# Weekly overzicht: hele zondag (zodat je cron niet perfect hoeft te zijn)
-WEEKLY_SEND_HOUR = 0
-WEEKLY_SEND_MINUTE = 0
-WEEKLY_SEND_WINDOW_MINUTES = 24 * 60  # hele zondag
+DEBUG = (os.environ.get("DEBUG", "1").strip() != "0")
 
 DISCORD_MAX_LEN = 2000
 
-# Calendar link
+# Links
 CALENDAR_URL = "https://www.cryptocraft.com/calendar"
 CALENDAR_LINK = f"[Crypto Craft]({CALENDAR_URL})"
 CALENDAR_LABEL = "Calendar"
 
-DEBUG = (os.environ.get("DEBUG", "1").strip() != "0")
+# Dagoverzicht (blijft)
+DAILY_AFTER_MINUTES = 1
+
+# Reminder: vanaf 10:00, mag op elk moment later op de dag nog (1x)
+REMINDER_START_HOUR = 10
+REMINDER_START_MINUTE = 0
+REMINDER_WINDOW_MINUTES = 14 * 60  # 10:00 -> 00:00 (hele rest van de dag)
+
+# Daguitslag: vanaf 23:00, mag ook nog in de nacht/ochtend erna (1x)
+RESULTS_START_HOUR = 23
+RESULTS_START_MINUTE = 0
+RESULTS_WINDOW_MINUTES = 10 * 60  # 23:00 -> 09:00 (volgende ochtend)
+
+# Weekoverzicht: zondagavond vanaf 18:00 tot middernacht (1x)
+WEEKLY_SUNDAY_START_HOUR = 18
+WEEKLY_SUNDAY_START_MINUTE = 0
+WEEKLY_SUNDAY_WINDOW_MINUTES = 6 * 60  # 18:00 -> 00:00
 
 
 def tzinfo():
@@ -85,11 +83,6 @@ def fetch_json(url: str):
 
 
 def post_discord(content: str, max_retries: int = 8):
-    """
-    Post a message to Discord via webhook.
-    - Logs useful info on HTTP errors (especially 403).
-    - Retries on 429 with backoff.
-    """
     if not WEBHOOK:
         raise RuntimeError("DISCORD_WEBHOOK_URL is not set")
 
@@ -108,7 +101,6 @@ def post_discord(content: str, max_retries: int = 8):
                 },
                 method="POST",
             )
-
             ctx = ssl.create_default_context()
             with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
                 if DEBUG:
@@ -200,63 +192,6 @@ def fmt_time_local(dt):
     return f"{dt.strftime('%H:%M')} {dt.tzname()}"
 
 
-def get_actual(ev):
-    """
-    Robuuste actual extractor (direct + nested + varianten).
-    """
-    direct_keys = (
-        "actual", "Actual",
-        "result", "Result",
-        "value", "Value",
-        "outcome", "Outcome",
-        "reading", "Reading",
-        "actualValue", "actual_value",
-        "act", "Act",
-    )
-    for k in direct_keys:
-        v = ev.get(k)
-        if v is not None and v != "":
-            return str(v)
-
-    nested_parents = ("data", "meta", "stats", "values", "event")
-    nested_keys = direct_keys
-    for p in nested_parents:
-        obj = ev.get(p)
-        if isinstance(obj, dict):
-            for k in nested_keys:
-                v = obj.get(k)
-                if v is not None and v != "":
-                    return str(v)
-
-    return None
-
-
-def get_forecast(ev):
-    """
-    Robuuste forecast extractor (direct + nested + varianten).
-    """
-    direct_keys = (
-        "forecast", "Forecast",
-        "consensus", "Consensus",
-        "estimate", "Estimate",
-        "expected", "Expected",
-    )
-    for k in direct_keys:
-        v = ev.get(k)
-        if v is not None and v != "":
-            return str(v)
-
-    for p in ("data", "meta", "stats", "values", "event"):
-        obj = ev.get(p)
-        if isinstance(obj, dict):
-            for k in direct_keys:
-                v = obj.get(k)
-                if v is not None and v != "":
-                    return str(v)
-
-    return None
-
-
 def weekday_nl(dt: datetime):
     names = ["Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag", "Zondag"]
     return names[dt.weekday()]
@@ -307,7 +242,7 @@ def main():
         print("DEBUG_WEEKDAY:", now.weekday(), "(zondag=6)")
         print("DEBUG_TODAYS_HIGH_COUNT:", len(todays_high))
 
-    # --- Dagoverzicht ---
+    # --- Dagoverzicht (blijft) ---
     if key not in daily_sent and now >= today_start + timedelta(minutes=DAILY_AFTER_MINUTES):
         if todays_high:
             blocks = [
@@ -321,72 +256,66 @@ def main():
             post_discord(msg)
         daily_sent.add(key)
 
-    # --- 1x Dag reminder (10:00-11:00) ---
+    # --- Reminder 1x per dag (vanaf 10:00, brede window zodat hij altijd komt) ---
     reminder_key = f"reminder-{key}"
-    reminder_time = today_start.replace(hour=DAILY_REMINDER_HOUR, minute=DAILY_REMINDER_MINUTE)
+    reminder_start = today_start.replace(hour=REMINDER_START_HOUR, minute=REMINDER_START_MINUTE)
+    reminder_end = reminder_start + timedelta(minutes=REMINDER_WINDOW_MINUTES)
+
     if DEBUG:
         print("DEBUG_REMINDER_KEY:", reminder_key, "already_sent=", reminder_key in reminded)
-        print("DEBUG_REMINDER_WINDOW:", reminder_time.isoformat(), "to",
-              (reminder_time + timedelta(minutes=DAILY_REMINDER_WINDOW_MINUTES)).isoformat())
+        print("DEBUG_REMINDER_WINDOW:", reminder_start.isoformat(), "to", reminder_end.isoformat())
 
-    if reminder_key not in reminded:
-        if reminder_time <= now < reminder_time + timedelta(minutes=DAILY_REMINDER_WINDOW_MINUTES):
-            if todays_high:
-                blocks = [f"⏰ {fmt_time_local(dt)}\n📌 {ev.get('title')}" for ev, dt in todays_high]
-                header = f"⏰ **Dag reminder – HIGH impact vandaag ({display_date})**"
-                for msg in chunk_messages(blocks, header):
-                    post_discord(msg)
-            else:
-                post_discord(f"⏰ **Dag reminder ({display_date})**\n\nGeen HIGH impact events vandaag.")
-            reminded.add(reminder_key)
+    if reminder_key not in reminded and reminder_start <= now < reminder_end:
+        if todays_high:
+            blocks = [f"⏰ {fmt_time_local(dt)}\n📌 {ev.get('title')}" for ev, dt in todays_high]
+            header = f"⏰ **Dag reminder – HIGH impact vandaag ({display_date})**"
+            for msg in chunk_messages(blocks, header):
+                post_discord(msg)
+        else:
+            post_discord(f"⏰ **Dag reminder ({display_date})**\n\nGeen HIGH impact events vandaag.")
+        reminded.add(reminder_key)
 
-    # --- 1x Daguitslag (23:00) met Forecast + Actual ---
-    results_key = f"results-{key}"
-    results_time = today_start.replace(hour=DAILY_RESULTS_HOUR, minute=DAILY_RESULTS_MINUTE)
+    # --- Daguitslag: alleen tekst + link (vanaf 23:00, brede window) ---
+    # Let op: na middernacht is `key` veranderd. Daarom gebruiken we óók yesterday-key in de nacht.
+    yesterday_start = today_start - timedelta(days=1)
+    yesterday_key = yesterday_start.strftime("%Y-%m-%d")
+    yesterday_display = yesterday_start.strftime("%d-%m-%Y")
+
+    # Als het tussen 00:00 en 09:00 is, sturen we de "daguitslag" voor gisteren.
+    if now.hour < 9:
+        results_effective_key = f"results-{yesterday_key}"
+        results_effective_date = yesterday_display
+        results_start = yesterday_start.replace(hour=RESULTS_START_HOUR, minute=RESULTS_START_MINUTE)
+        results_end = results_start + timedelta(minutes=RESULTS_WINDOW_MINUTES)
+    else:
+        results_effective_key = f"results-{key}"
+        results_effective_date = display_date
+        results_start = today_start.replace(hour=RESULTS_START_HOUR, minute=RESULTS_START_MINUTE)
+        results_end = results_start + timedelta(minutes=RESULTS_WINDOW_MINUTES)
+
     if DEBUG:
-        print("DEBUG_RESULTS_KEY:", results_key, "already_sent=", results_key in results_sent)
-        print("DEBUG_RESULTS_WINDOW:", results_time.isoformat(), "to",
-              (results_time + timedelta(minutes=DAILY_RESULTS_WINDOW_MINUTES)).isoformat())
+        print("DEBUG_RESULTS_KEY:", results_effective_key, "already_sent=", results_effective_key in results_sent)
+        print("DEBUG_RESULTS_WINDOW:", results_start.isoformat(), "to", results_end.isoformat())
 
-    if results_key not in results_sent:
-        if results_time <= now < results_time + timedelta(minutes=DAILY_RESULTS_WINDOW_MINUTES):
-            if todays_high:
-                blocks = []
-                for ev, dt in todays_high:
-                    forecast = get_forecast(ev)
-                    actual = get_actual(ev)
+    if results_effective_key not in results_sent and results_start <= now < results_end:
+        post_discord(
+            f"📊 **Daguitslag – HIGH impact ({results_effective_date})**\n\n"
+            f"Bekijk nu de daguitslag:\n"
+            f"🔗 {CALENDAR_LABEL}: {CALENDAR_LINK}"
+        )
+        results_sent.add(results_effective_key)
 
-                    forecast_text = forecast if forecast is not None else "Geen forecast"
-                    actual_text = actual if actual is not None else "Nog geen uitslag"
-
-                    blocks.append(
-                        f"📌 **{ev.get('title')}**\n"
-                        f"⏰ {fmt_time_local(dt)}\n"
-                        f"📊 Forecast: {forecast_text}\n"
-                        f"📈 Actual: {actual_text}"
-                    )
-
-                header = f"📊 **Daguitslag – HIGH impact ({display_date})**"
-                for msg in chunk_messages(blocks, header):
-                    post_discord(msg)
-            else:
-                post_discord(f"📊 **Daguitslag ({display_date})**\n\nGeen HIGH impact events vandaag.")
-            results_sent.add(results_key)
-
-    # --- Weekly overzicht met daglabels (hele zondag window) ---
-    weekly_key = today_start.strftime("%G-%V")
-    weekly_time = today_start.replace(hour=WEEKLY_SEND_HOUR, minute=WEEKLY_SEND_MINUTE)
-    weekly_end = weekly_time + timedelta(minutes=WEEKLY_SEND_WINDOW_MINUTES)
+    # --- Weekoverzicht: zondagavond (18:00 -> 00:00), met daglabels ---
+    # We sturen het overzicht voor de komende week (maandag t/m zondag).
+    weekly_key = today_start.strftime("%G-%V")  # ISO-week van vandaag (zondag)
+    weekly_start = today_start.replace(hour=WEEKLY_SUNDAY_START_HOUR, minute=WEEKLY_SUNDAY_START_MINUTE)
+    weekly_end = weekly_start + timedelta(minutes=WEEKLY_SUNDAY_WINDOW_MINUTES)
 
     if DEBUG:
         print("DEBUG_WEEKLY_KEY:", weekly_key, "already_sent=", weekly_key in weekly_sent)
-        print("DEBUG_WEEKLY_WINDOW:", weekly_time.isoformat(), "to", weekly_end.isoformat())
+        print("DEBUG_WEEKLY_WINDOW:", weekly_start.isoformat(), "to", weekly_end.isoformat())
 
-    if (
-        weekly_key not in weekly_sent
-        and now.weekday() == 6
-        and weekly_time <= now < weekly_end
-    ):
+    if weekly_key not in weekly_sent and now.weekday() == 6 and weekly_start <= now < weekly_end:
         week_start = today_start + timedelta(days=1)   # maandag
         week_end = week_start + timedelta(days=7)      # volgende maandag
         week_start_label = week_start.strftime("%d-%m-%Y")
@@ -402,7 +331,6 @@ def main():
         upcoming_high.sort(key=lambda x: x[1])
 
         if upcoming_high:
-            # groepeer per dag
             grouped = {}
             for ev, dt in upcoming_high:
                 day_key = dt.date().isoformat()
@@ -426,8 +354,10 @@ def main():
         )
         for msg in chunk_messages(blocks, header):
             post_discord(msg)
+
         weekly_sent.add(weekly_key)
 
+    # Save state
     state["reminded"] = list(reminded)
     state["daily_sent"] = list(daily_sent)
     state["results_sent"] = list(results_sent)
