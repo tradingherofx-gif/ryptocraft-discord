@@ -5,8 +5,13 @@ on:
     - cron: "*/5 * * * *"   # elke 5 minuten (UTC)
   workflow_dispatch:
 
+# Zorg dat er nooit 2 runs tegelijk state.json proberen te committen
+concurrency:
+  group: cryptocraft-state
+  cancel-in-progress: true
+
 permissions:
-  contents: write  # nodig om state.json terug te pushen
+  contents: write
 
 jobs:
   run:
@@ -14,27 +19,43 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # nodig voor rebase/push betrouwbaarheid
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # TIMEZONE fallback doen we hier betrouwbaar (zonder github expression ||)
+      - name: Prepare env
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.TIMEZONE }}" ]; then
+            echo "TIMEZONE=Europe/Amsterdam" >> $GITHUB_ENV
+          else
+            echo "TIMEZONE=${{ secrets.TIMEZONE }}" >> $GITHUB_ENV
+          fi
+
       - name: Run script
         env:
           CRYPTOCRAFT_JSON_URL: ${{ secrets.CRYPTOCRAFT_JSON_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          TIMEZONE: ${{ secrets.TIMEZONE || 'Europe/Amsterdam' }}
           STATE_FILE: state.json
         run: python script.py
 
       - name: Commit updated state.json (if changed)
+        shell: bash
         run: |
           if git status --porcelain | grep -q "state.json"; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
+
             git add state.json
             git commit -m "Update state.json"
+
+            # Pull/rebase zodat push niet faalt als er nét een andere run was
+            git pull --rebase
             git push
           else
             echo "No state.json changes"
