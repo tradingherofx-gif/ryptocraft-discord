@@ -71,11 +71,13 @@ print("CONFIG_TZ:", TZ)
 print("CONFIG_STATE_FILE:", STATE_FILE)
 print("CONFIG_DEBUG:", DEBUG)
 
+
 def _host(url: str):
     try:
         return url.split("/")[2] if url else None
     except Exception:
         return None
+
 
 print("CONFIG_WEBHOOK_DEFAULT_SET:", bool(WEBHOOK_DEFAULT))
 print("CONFIG_WEBHOOK_DEFAULT_HOST:", _host(WEBHOOK_DEFAULT))
@@ -243,6 +245,69 @@ def chunk_messages(blocks, header):
     return msgs
 
 
+# -------- Results helpers (kleuren) --------
+
+def _to_number(val):
+    """
+    Probeert strings als '0.4%', '1,2', '250K', '1.5M', '2B' om te zetten naar float.
+    Returnt None als het niet kan.
+    """
+    if val is None:
+        return None
+
+    s = str(val).strip()
+    if not s or s in {"-", "–", "n/a", "N/A", "NA", "None"}:
+        return None
+
+    s = s.replace(" ", "")
+
+    mult = 1.0
+    if s[-1:] in {"K", "k"}:
+        mult = 1_000.0
+        s = s[:-1]
+    elif s[-1:] in {"M", "m"}:
+        mult = 1_000_000.0
+        s = s[:-1]
+    elif s[-1:] in {"B", "b"}:
+        mult = 1_000_000_000.0
+        s = s[:-1]
+
+    s = s.replace("%", "")
+
+    if "," in s and "." in s:
+        s = s.replace(",", "")
+    else:
+        s = s.replace(",", ".")
+
+    if s.startswith("+"):
+        s = s[1:]
+
+    try:
+        return float(s) * mult
+    except Exception:
+        return None
+
+
+def compare_actual_forecast(actual, forecast):
+    """
+    🟢 = actual > forecast
+    🔴 = actual < forecast
+    🟡 = gelijk
+    ⚪ = niet te vergelijken
+    """
+    a = _to_number(actual)
+    f = _to_number(forecast)
+
+    if a is None or f is None:
+        return "⚪", "n.v.t."
+
+    if abs(a - f) < 1e-12:
+        return "🟡", "gelijk"
+    if a > f:
+        return "🟢", "boven forecast"
+    return "🔴", "onder forecast"
+
+
 def main():
     now = datetime.now(TZ)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -288,7 +353,7 @@ def main():
             post_discord(msg, pick_webhook("daily"))
         daily_sent.add(key)
 
-    # --- Reminder 1x per dag (vanaf 10:00, brede window zodat hij altijd komt) ---
+    # --- Reminder 1x per dag (vanaf 10:00, brede window) ---
     reminder_key = f"reminder-{key}"
     reminder_start = today_start.replace(hour=REMINDER_START_HOUR, minute=REMINDER_START_MINUTE)
     reminder_end = reminder_start + timedelta(minutes=REMINDER_WINDOW_MINUTES)
@@ -310,8 +375,7 @@ def main():
             )
         reminded.add(reminder_key)
 
-    # --- Daguitslag: alleen tekst + link (vanaf 23:00, brede window) ---
-    # Let op: na middernacht is `key` veranderd. Daarom gebruiken we óók yesterday-key in de nacht.
+    # --- Daguitslag met echte resultaten + kleuren (vanaf 23:00, brede window) ---
     yesterday_start = today_start - timedelta(days=1)
     yesterday_key = yesterday_start.strftime("%Y-%m-%d")
     yesterday_display = yesterday_start.strftime("%d-%m-%Y")
@@ -320,11 +384,15 @@ def main():
     if now.hour < 9:
         results_effective_key = f"results-{yesterday_key}"
         results_effective_date = yesterday_display
+        results_day_start = yesterday_start
+        results_day_end = yesterday_start + timedelta(days=1)
         results_start = yesterday_start.replace(hour=RESULTS_START_HOUR, minute=RESULTS_START_MINUTE)
         results_end = results_start + timedelta(minutes=RESULTS_WINDOW_MINUTES)
     else:
         results_effective_key = f"results-{key}"
         results_effective_date = display_date
+        results_day_start = today_start
+        results_day_end = today_end
         results_start = today_start.replace(hour=RESULTS_START_HOUR, minute=RESULTS_START_MINUTE)
         results_end = results_start + timedelta(minutes=RESULTS_WINDOW_MINUTES)
 
@@ -333,16 +401,46 @@ def main():
         print("DEBUG_RESULTS_WINDOW:", results_start.isoformat(), "to", results_end.isoformat())
 
     if results_effective_key not in results_sent and results_start <= now < results_end:
-        post_discord(
-            f"📊 **Daguitslag – HIGH impact ({results_effective_date})**\n\n"
-            f"Bekijk nu de daguitslag:\n"
-            f"🔗 {CALENDAR_LABEL}: {CALENDAR_LINK}",
-            pick_webhook("results"),
-        )
+        results_blocks = []
+
+        for ev in events:
+            if normalize_impact(ev) != "HIGH":
+                continue
+
+            dt = parse_dt_local(ev)
+            if not dt or not (results_day_start <= dt < results_day_end):
+                continue
+
+            title = ev.get("title", "Onbekend event")
+            actual = ev.get("actual", "–")
+            forecast = ev.get("forecast", "–")
+            previous = ev.get("previous", "–")
+
+            emoji, verdict = compare_actual_forecast(actual, forecast)
+
+            results_blocks.append(
+                f"{emoji} **{title}**\n"
+                f"⏰ {fmt_time_local(dt)}\n"
+                f"Actual: {actual}\n"
+                f"Forecast: {forecast}\n"
+                f"Previous: {previous}\n"
+                f"Resultaat: {verdict}"
+            )
+
+        header = f"📊 **Daguitslag – HIGH impact ({results_effective_date})**"
+
+        if results_blocks:
+            for msg in chunk_messages(results_blocks, header):
+                post_discord(msg, pick_webhook("results"))
+        else:
+            post_discord(
+                f"{header}\n\nNog geen resultaten beschikbaar.\n\n🔗 {CALENDAR_LABEL}: {CALENDAR_LINK}",
+                pick_webhook("results"),
+            )
+
         results_sent.add(results_effective_key)
 
     # --- Weekoverzicht: zondagavond (18:00 -> 00:00), met daglabels ---
-    # We sturen het overzicht voor de komende week (maandag t/m zondag).
     weekly_key = today_start.strftime("%G-%V")  # ISO-week van vandaag (zondag)
     weekly_start = today_start.replace(hour=WEEKLY_SUNDAY_START_HOUR, minute=WEEKLY_SUNDAY_START_MINUTE)
     weekly_end = weekly_start + timedelta(minutes=WEEKLY_SUNDAY_WINDOW_MINUTES)
