@@ -1,6 +1,5 @@
 import os
 import json
-import hashlib
 import urllib.request
 import urllib.error
 import time
@@ -14,12 +13,18 @@ except Exception:
     ZoneInfo = None
 
 # ---- Secrets / Config ----
-JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"]
-WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"].strip()
+JSON_URL = os.environ["CRYPTOCRAFT_JSON_URL"].strip()
+
+# Default kanaal (fallback voor alles)
+WEBHOOK_DEFAULT = os.environ["DISCORD_WEBHOOK_URL"].strip()
+
+# Optioneel: aparte kanalen per type bericht
+WEBHOOK_WEEKLY = os.environ.get("DISCORD_WEBHOOK_WEEKLY", "").strip()
+WEBHOOK_REMINDER = os.environ.get("DISCORD_WEBHOOK_REMINDER", "").strip()
+WEBHOOK_RESULTS = os.environ.get("DISCORD_WEBHOOK_RESULTS", "").strip()  # daguitslag kanaal
 
 TIMEZONE_NAME = (os.environ.get("TIMEZONE") or "Europe/Amsterdam").strip()
 STATE_FILE = os.environ.get("STATE_FILE", "state.json").strip()
-
 DEBUG = (os.environ.get("DEBUG", "1").strip() != "0")
 
 DISCORD_MAX_LEN = 2000
@@ -65,8 +70,35 @@ print("CONFIG_TIMEZONE_NAME:", TIMEZONE_NAME)
 print("CONFIG_TZ:", TZ)
 print("CONFIG_STATE_FILE:", STATE_FILE)
 print("CONFIG_DEBUG:", DEBUG)
-print("CONFIG_WEBHOOK_SET:", bool(WEBHOOK))
-print("CONFIG_WEBHOOK_HOST:", (WEBHOOK.split("/")[2] if WEBHOOK else None))
+
+def _host(url: str):
+    try:
+        return url.split("/")[2] if url else None
+    except Exception:
+        return None
+
+print("CONFIG_WEBHOOK_DEFAULT_SET:", bool(WEBHOOK_DEFAULT))
+print("CONFIG_WEBHOOK_DEFAULT_HOST:", _host(WEBHOOK_DEFAULT))
+print("CONFIG_WEBHOOK_WEEKLY_SET:", bool(WEBHOOK_WEEKLY))
+print("CONFIG_WEBHOOK_WEEKLY_HOST:", _host(WEBHOOK_WEEKLY))
+print("CONFIG_WEBHOOK_REMINDER_SET:", bool(WEBHOOK_REMINDER))
+print("CONFIG_WEBHOOK_REMINDER_HOST:", _host(WEBHOOK_REMINDER))
+print("CONFIG_WEBHOOK_RESULTS_SET:", bool(WEBHOOK_RESULTS))
+print("CONFIG_WEBHOOK_RESULTS_HOST:", _host(WEBHOOK_RESULTS))
+
+
+def pick_webhook(kind: str) -> str:
+    """
+    kind: "daily" | "reminder" | "results" | "weekly"
+    fallback: WEBHOOK_DEFAULT
+    """
+    mapping = {
+        "daily": WEBHOOK_DEFAULT,
+        "reminder": WEBHOOK_REMINDER or WEBHOOK_DEFAULT,
+        "results": WEBHOOK_RESULTS or WEBHOOK_DEFAULT,
+        "weekly": WEBHOOK_WEEKLY or WEBHOOK_DEFAULT,
+    }
+    return mapping.get(kind, WEBHOOK_DEFAULT)
 
 
 def fetch_json(url: str):
@@ -82,9 +114,9 @@ def fetch_json(url: str):
         return json.loads(r.read().decode("utf-8", errors="replace"))
 
 
-def post_discord(content: str, max_retries: int = 8):
-    if not WEBHOOK:
-        raise RuntimeError("DISCORD_WEBHOOK_URL is not set")
+def post_discord(content: str, webhook_url: str, max_retries: int = 8):
+    if not webhook_url:
+        raise RuntimeError("Webhook URL is not set for this message type")
 
     content = (content or "")[:DISCORD_MAX_LEN]
     payload = json.dumps({"content": content}).encode("utf-8")
@@ -93,7 +125,7 @@ def post_discord(content: str, max_retries: int = 8):
     for attempt in range(1, max_retries + 1):
         try:
             req = urllib.request.Request(
-                WEBHOOK,
+                webhook_url,
                 data=payload,
                 headers={
                     "Content-Type": "application/json",
@@ -253,7 +285,7 @@ def main():
             blocks = ["Geen HIGH impact events vandaag."]
 
         for msg in chunk_messages(blocks, f"📅 **Crypto Craft – HIGH impact ({display_date})**"):
-            post_discord(msg)
+            post_discord(msg, pick_webhook("daily"))
         daily_sent.add(key)
 
     # --- Reminder 1x per dag (vanaf 10:00, brede window zodat hij altijd komt) ---
@@ -270,9 +302,12 @@ def main():
             blocks = [f"⏰ {fmt_time_local(dt)}\n📌 {ev.get('title')}" for ev, dt in todays_high]
             header = f"⏰ **Dag reminder – HIGH impact vandaag ({display_date})**"
             for msg in chunk_messages(blocks, header):
-                post_discord(msg)
+                post_discord(msg, pick_webhook("reminder"))
         else:
-            post_discord(f"⏰ **Dag reminder ({display_date})**\n\nGeen HIGH impact events vandaag.")
+            post_discord(
+                f"⏰ **Dag reminder ({display_date})**\n\nGeen HIGH impact events vandaag.",
+                pick_webhook("reminder"),
+            )
         reminded.add(reminder_key)
 
     # --- Daguitslag: alleen tekst + link (vanaf 23:00, brede window) ---
@@ -301,7 +336,8 @@ def main():
         post_discord(
             f"📊 **Daguitslag – HIGH impact ({results_effective_date})**\n\n"
             f"Bekijk nu de daguitslag:\n"
-            f"🔗 {CALENDAR_LABEL}: {CALENDAR_LINK}"
+            f"🔗 {CALENDAR_LABEL}: {CALENDAR_LINK}",
+            pick_webhook("results"),
         )
         results_sent.add(results_effective_key)
 
@@ -353,7 +389,7 @@ def main():
             f"({week_start_label} – {week_end_label})**"
         )
         for msg in chunk_messages(blocks, header):
-            post_discord(msg)
+            post_discord(msg, pick_webhook("weekly"))
 
         weekly_sent.add(weekly_key)
 
