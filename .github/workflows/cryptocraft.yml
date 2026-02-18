@@ -40,8 +40,17 @@ jobs:
       - name: Run script
         env:
           CRYPTOCRAFT_JSON_URL: ${{ secrets.CRYPTOCRAFT_JSON_URL }}
+
+          # Default kanaal (dagoverzicht + fallback)
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+          # Aparte kanalen
+          DISCORD_WEBHOOK_WEEKLY: ${{ secrets.DISCORD_WEBHOOK_WEEKLY }}
+          DISCORD_WEBHOOK_REMINDER: ${{ secrets.DISCORD_WEBHOOK_REMINDER }}
+          DISCORD_WEBHOOK_RESULTS: ${{ secrets.DISCORD_WEBHOOK_RESULTS }}
+
           STATE_FILE: state.json
+          TIMEZONE: ${{ env.TIMEZONE }}
         run: python script.py
 
       - name: Commit updated state.json (if changed)
