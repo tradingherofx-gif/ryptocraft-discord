@@ -213,12 +213,31 @@ def normalize_impact(ev):
 
 
 def parse_dt_local(ev):
+    """
+    FIX: Als datetime string GEEN timezone bevat, neem aan dat die al in lokale tijd (Europe/Amsterdam) is.
+    Als er WEL timezone in zit, converteer naar TZ.
+    Ondersteunt ook ISO strings met 'Z'.
+    """
     dt_str = ev.get("datetime") or ev.get("date")
     if not dt_str:
         return None
-    dt = datetime.fromisoformat(dt_str)
+
+    s = str(dt_str).strip()
+
+    # Support 'Z' suffix (UTC)
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        return None
+
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        # Naive => behandel als lokale tijd
+        dt = dt.replace(tzinfo=TZ)
+        return dt
+
     return dt.astimezone(TZ)
 
 
@@ -248,10 +267,6 @@ def chunk_messages(blocks, header):
 # -------- Results helpers (kleuren) --------
 
 def _to_number(val):
-    """
-    Probeert strings als '0.4%', '1,2', '250K', '1.5M', '2B' om te zetten naar float.
-    Returnt None als het niet kan.
-    """
     if val is None:
         return None
 
@@ -289,12 +304,6 @@ def _to_number(val):
 
 
 def compare_actual_forecast(actual, forecast):
-    """
-    🟢 = actual > forecast
-    🔴 = actual < forecast
-    🟡 = gelijk
-    ⚪ = niet te vergelijken
-    """
     a = _to_number(actual)
     f = _to_number(forecast)
 
@@ -380,7 +389,6 @@ def main():
     yesterday_key = yesterday_start.strftime("%Y-%m-%d")
     yesterday_display = yesterday_start.strftime("%d-%m-%Y")
 
-    # Als het tussen 00:00 en 09:00 is, sturen we de "daguitslag" voor gisteren.
     if now.hour < 9:
         results_effective_key = f"results-{yesterday_key}"
         results_effective_date = yesterday_display
@@ -441,7 +449,7 @@ def main():
         results_sent.add(results_effective_key)
 
     # --- Weekoverzicht: zondagavond (18:00 -> 00:00), met daglabels ---
-    weekly_key = today_start.strftime("%G-%V")  # ISO-week van vandaag (zondag)
+    weekly_key = today_start.strftime("%G-%V")
     weekly_start = today_start.replace(hour=WEEKLY_SUNDAY_START_HOUR, minute=WEEKLY_SUNDAY_START_MINUTE)
     weekly_end = weekly_start + timedelta(minutes=WEEKLY_SUNDAY_WINDOW_MINUTES)
 
